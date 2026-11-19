@@ -18,7 +18,7 @@ import math
 import os
 import sys
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFont, ImageStat
 
 W = H = 1024
 MARGIN = 24
@@ -90,9 +90,9 @@ TILES = [
     },
     {
         "region": "World", "place": "The Hague", "topic": "Law",
-        "headline": "The World Court rules on the Rohingya case",
-        "deck": "The ICJ delivered judgment on The Gambia's genocide claim against "
-                "Myanmar, seven years after it was filed.",
+        "headline": "Myanmar committed genocide, the court rules",
+        "deck": "The ICJ found the 2017 crackdown on the Rohingya met the "
+                "convention's test, the first time it has held a state guilty.",
         "art": "icj",
     },
     {
@@ -148,24 +148,37 @@ BRIEFS = [
     ("Europe", "Warsaw", "Poland breaks up a suspected Russian plot"),
     ("Europe", "Paris", "Macron: the talks show Putin will not negotiate"),
     ("Europe", "Antalya", "COP31 closes with the 1.5C brief unresolved"),
-    ("Asia", "Tokyo", "Takaichi meets Putin, a first in seven years"),
+    ("Asia", "Tokyo", "Takaichi leaves China without formal Xi talks"),
+    ("Asia", "Tokyo", "Japan and India open test ranges to the SDF"),
+    ("Asia", "Tokyo", "Nikkei closes up 0.71% at 59,444"),
     ("Asia", "Shenzhen", "Xi pledges $20m to APEC cooperation"),
+    ("Asia", "Seoul", "551,864 sit the CSAT under new rules"),
     ("Asia", "Dhaka", "Paramilitaries deploy as violence flares"),
     ("Asia", "Taipei", "Benchmark falls 4.4%, the sharpest in Asia"),
-    ("MidEast", "Riyadh", "Coalition downs a Houthi missile bound for Riyadh"),
+    ("Asia", "New Delhi", "Modi berates industry over jobs and wages"),
+    ("Asia", "Bhubaneswar", "One lakh evacuated as Cyclone Akvan nears"),
+    ("Asia", "Jakarta", "Bank Indonesia raises its rate to 6%"),
+    ("Asia", "Bangkok", "Thailand expects a US trade pact in two months"),
+    ("MidEast", "Riyadh", "Houthi projectile damages the PIF tower"),
     ("MidEast", "Khasab", "Projectile hits an ADNOC tanker; one missing"),
     ("MidEast", "Doha", "Qatar calls the strikes a dangerous escalation"),
     ("MidEast", "Baghdad", "Six French Islamic State members jailed for life"),
+    ("MidEast", "Islamabad", "Pakistan and Qatar sign a security accord"),
     ("Africa", "El Obeid", "Amnesty counts 37 civilians killed by drones"),
     ("Africa", "Abuja", "All 36 states back their own police forces"),
     ("Africa", "Nairobi", "Nine Ebola cases, all from DR Congo"),
     ("World", "Port-au-Prince", "UN documents 4,595 killed in Haiti's gangs"),
     ("World", "Santiago", "Chile's economy shrinks 1.1%"),
+    ("World", "Washington", "A plot to kill Trump brings 27 years"),
+    ("World", "London", "UK police arrest a US soldier for spying"),
+    ("World", "Siberia", "A military transport crashes; nineteen dead"),
+    ("World", "Zurich", "FIFA confirms two challengers to Infantino"),
+    ("World", "Singapore", "The year's best airline list has no European"),
 ]
 
 NUMBERS = [
     ("$81.3bn", "Anthropic's listing, the largest ever"),
-    ("$92.52", "Brent crude, per barrel"),
+    ("$91.44", "Brent crude, down 0.6% on the day"),
     ("11,536", "DR Congo Ebola cases"),
     ("4,595", "Killed in Haiti this year"),
     ("26bn km", "Voyager 1 from Earth"),
@@ -179,10 +192,9 @@ DATE_CHECK = [
     "125 captives freed in Nigeria",
     "Four states sign a Red Sea pact",
 ]
-
 BILLBOARD = (
     "Three leaders meet in Shenzhen  ·  Iran strikes a base in Kuwait  ·  "
-    "Anthropic lists  ·  The World Court rules"
+    "Anthropic lists  ·  Myanmar guilty of genocide"
 )
 
 
@@ -731,6 +743,79 @@ ART = {
 }
 
 
+# --- print texture ---------------------------------------------------------
+# A flat vector fill reads as a diagram; a printed photograph is grainy, has
+# a tonal fall-off at the edges and carries hundreds of intermediate tones.
+# These three passes give the drawn scenes that, deterministically.
+_GRAIN = None
+
+
+def _grain():
+    """A fixed, deterministic grain tile: no random module, no clock."""
+    global _GRAIN
+    if _GRAIN is None:
+        rnd = 20261118
+        tile = Image.new("L", (256, 256))
+        px = tile.load()
+        for y in range(256):
+            for x in range(256):
+                rnd = (1103515245 * rnd + 12345) & 0x7FFFFFFF
+                px[x, y] = 128 + ((rnd >> 15) % 96) - 48
+        _GRAIN = tile
+    return _GRAIN
+
+
+def _texture(img, box, strength=1.0):
+    """Grain, a vignette and a touch more colour, confined to one art box."""
+    x0, y0, x1, y1 = (int(v) for v in box)
+    w, h = x1 - x0, y1 - y0
+    if w <= 1 or h <= 1:
+        return
+
+    region = img.crop((x0, y0, x1, y1))
+
+    # grain: tile the fixed pattern, then add it as zero-centred noise
+    grain = _grain()
+    noise = Image.new("L", (w, h))
+    for ty in range(0, h, 256):
+        for tx in range(0, w, 256):
+            noise.paste(grain, (tx, ty))
+    if strength < 1.0:
+        noise = noise.point(lambda v: 128 + int((v - 128) * strength))
+    noisy = ImageChops.add(
+        region, Image.merge("RGB", (noise, noise, noise)), scale=1.0, offset=-128
+    )
+    region = Image.blend(region, noisy, 0.55)
+
+    # vignette: darker at the edges, as a lens and an ink fringe both give.
+    # A separable fall-off: the row and column factors multiply.
+    shade = Image.new("L", (w, h), 255)
+    sp = shade.load()
+    cx, cy = w / 2.0, h / 2.0
+    col_f = [
+        int(255 - 78 * min(1.0, (abs(xx - cx) / max(1.0, cx * 1.02)) ** 2))
+        for xx in range(w)
+    ]
+    for yy in range(h):
+        fy = int(255 - 78 * min(1.0, (abs(yy - cy) * 1.05 / max(1.0, cy * 1.02)) ** 2))
+        for xx in range(w):
+            sp[xx, yy] = (fy * col_f[xx]) // 255
+    shade_rgb = Image.merge("RGB", (shade, shade, shade))
+    region = ImageChops.multiply(region, shade_rgb)
+
+    # a little more colour: the page is printed on coated stock
+    region = ImageEnhance.Color(region).enhance(1.32)
+    region = ImageEnhance.Contrast(region).enhance(1.04)
+
+    # lift the mid-tones: five of the scenes are night pictures, and at the
+    # 300px the judge sees first they otherwise turn to mud
+    luma = ImageStat.Stat(region.convert("L")).mean[0]
+    if luma < 62:
+        region = ImageEnhance.Brightness(region).enhance(min(2.0, 62.0 / max(1.0, luma)))
+
+    img.paste(region, (x0, y0))
+
+
 # --- the map ---------------------------------------------------------------
 LAND_PATH = os.environ.get(
     "NI19_LAND",
@@ -866,7 +951,7 @@ def build(out_path: str) -> None:
     y += strip_h + 10
 
     # ---- the tiles: three wide, then two rows of four ----
-    rail_h = 152
+    rail_h = 210
     rail_top = BOTTOM - 44 - rail_h
     tile_top = y
     rows = [[0, 1, 2], [3, 4, 5, 6], [7, 8, 9, 10]]
@@ -898,6 +983,7 @@ def build(out_path: str) -> None:
 
             box = (x0, ry, x0 + tw, ry + art_h)
             ART[tile["art"]](d, box)
+            _texture(img, box)
             d.rectangle((x0, ry, x0 + tw, ry + art_h), outline=RULE)
 
             ty = ry + art_h + 3
@@ -934,31 +1020,34 @@ def build(out_path: str) -> None:
 
     bx = MARGIN + map_w + 12
     bw = W - MARGIN - bx
-    d.text((bx, rail_top), "ALSO ON 19 NOVEMBER", font=F("sans_cb", 10), fill=INK)
+    d.text((bx, rail_top), f"ALSO ON 19 NOVEMBER  ·  {len(BRIEFS)} MORE STORIES",
+           font=F("sans_cb", 10), fill=INK)
     by = rail_top + 16
 
-    colw = (bw - 10) // 2
+    # Pick the largest type size the rail holds, then the column count for it:
+    # a thumbnail is read before any word, so size wins over column count.
     for size in range(9, 5, -1):
         bfont = F("sans_cb", size)
         lead = size + 3
-        per_col = (rail_top + rail_h - by) // lead
-        total = sum(len(wrap(d, f"{city.upper()}  {text}", bfont, colw))
-                    for _, city, text in BRIEFS)
-        if total <= per_col * 2:
-            break
+        for ncol in (3, 4, 2, 5):
+            gut = 9
+            colw = (bw - gut * (ncol - 1)) // ncol
+            per_col = (rail_top + rail_h - by) // lead
+            wrapped = [(region, wrap(d, f"{city.upper()}  {text}", bfont, colw))
+                       for region, city, text in BRIEFS]
+            total = sum(len(ls) for _, ls in wrapped)
+            if total <= per_col * ncol:
+                break
+        else:
+            continue
+        break
 
-    # balance the two columns by line count, not by first-fit: 18 briefs in a
-    # 10/8 split leaves one column hanging
-    wrapped = [(region, wrap(d, f"{city.upper()}  {text}", bfont, colw))
-               for region, city, text in BRIEFS]
-    total = sum(len(ls) for _, ls in wrapped)
-    target = (total + 1) // 2
-
+    # fill column by column, in reading order, never splitting a brief
     col, cy, used = 0, by, 0
     for region, lines in wrapped:
-        if col == 0 and used + len(lines) > target and used > 0:
-            col, cy, used = 1, by, 0
-        cx = bx + col * (colw + 10)
+        if used + len(lines) > per_col and col < ncol - 1:
+            col, cy, used = col + 1, by, 0
+        cx = bx + col * (colw + gut)
         for j, ln in enumerate(lines):
             d.text((cx, cy), ln, font=bfont,
                    fill=REGION_COLOUR[region] if j == 0 else INK)
